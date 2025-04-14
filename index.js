@@ -4,6 +4,10 @@ const app = express();
 
 const PORT = process.env.PORT || 3000;
 const XANO_STREAM_URL = 'https://xnwv-v1z6-dvnr.n7c.xano.io/api:13ckfFnv/stream';
+const XANO_JSONRPC_URL = 'https://xnwv-v1z6-dvnr.n7c.xano.io/api:13ckfFnv/jsonrpc';
+
+// Parse JSON bodies
+app.use(express.json());
 
 // Simple logging middleware
 app.use((req, res, next) => {
@@ -11,7 +15,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Main SSE endpoint
+// Main SSE endpoint - Keep existing functionality
 app.get('/raw-sse', async (req, res) => {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
@@ -19,7 +23,7 @@ app.get('/raw-sse', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   
   // Get session ID from query parameters
-  const sessionId = req.query.id || 'default_session';
+  const sessionId = req.query.id || 'test_session_123';
   const xanoUrl = `${XANO_STREAM_URL}?id=${sessionId}`;
   
   console.log(`Connecting to Xano SSE at: ${xanoUrl}`);
@@ -75,9 +79,119 @@ app.get('/raw-sse', async (req, res) => {
   });
 });
 
+// Handle OPTIONS requests for CORS
+app.options('*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.status(200).end();
+});
+
+// Add CORS headers to all responses
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
+
+// Simple JSON-RPC proxy that modifies the ID field
+app.post('/jsonrpc', async (req, res) => {
+  try {
+    console.log('Received JSON-RPC request:', JSON.stringify(req.body).substring(0, 200));
+    
+    // Get the session ID, using same logic as the SSE endpoint
+    const sessionId = req.query.id || 'test_session_123';
+    
+    // Create modified request with session ID as the id
+    const modifiedRequest = {
+      ...req.body,
+      id: sessionId
+    };
+    
+    console.log(`Forwarding modified request to Xano with id: ${sessionId}`);
+    
+    // Forward to Xano's JSON-RPC endpoint
+    const xanoResponse = await fetch(XANO_JSONRPC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(modifiedRequest)
+    });
+    
+    // Get response from Xano
+    const responseData = await xanoResponse.json();
+    
+    console.log('Xano response:', JSON.stringify(responseData).substring(0, 200));
+    
+    // Return Xano's response to the client
+    res.status(xanoResponse.status).json(responseData);
+  } catch (err) {
+    console.error('Error handling JSON-RPC request:', err);
+    res.status(500).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32603,
+        message: 'Internal server error: ' + err.message
+      },
+      id: null
+    });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).send('OK');
+});
+
+// Endpoint info endpoint
+app.get('/info', (req, res) => {
+  res.status(200).json({
+    sseEndpoint: '/raw-sse',
+    jsonrpcEndpoint: '/jsonrpc',
+    xanoSseUrl: XANO_STREAM_URL,
+    xanoJsonRpcUrl: XANO_JSONRPC_URL
+  });
+});
+
+// Support the /raw-sse/jsonrpc path too for compatibility
+app.post('/raw-sse/jsonrpc', async (req, res) => {
+  try {
+    console.log('Received JSON-RPC request via /raw-sse/jsonrpc');
+    
+    // Get the session ID, using same logic as the SSE endpoint
+    const sessionId = req.query.id || 'test_session_123';
+    
+    // Create modified request with session ID as the id
+    const modifiedRequest = {
+      ...req.body,
+      id: sessionId
+    };
+    
+    console.log(`Forwarding modified request to Xano with id: ${sessionId}`);
+    
+    // Forward to Xano's JSON-RPC endpoint
+    const xanoResponse = await fetch(XANO_JSONRPC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(modifiedRequest)
+    });
+    
+    // Get response from Xano
+    const responseData = await xanoResponse.json();
+    
+    // Return Xano's response to the client
+    res.status(xanoResponse.status).json(responseData);
+  } catch (err) {
+    console.error('Error handling JSON-RPC request:', err);
+    res.status(500).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32603,
+        message: 'Internal server error: ' + err.message
+      },
+      id: null
+    });
+  }
 });
 
 // Start the server
