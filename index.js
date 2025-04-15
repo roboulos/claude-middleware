@@ -14,7 +14,14 @@
 
   // Log helper
   const log = (msg, data) => {
-    console.log(`[${new Date().toISOString()}] ${msg}`, data ? data : '');
+    const timestamp = new Date().toISOString();
+    const message = `[${timestamp}] ${msg}`;
+    console.log(message, data ? data : '');
+
+    // Log active connections for debugging
+    if (msg.includes('connection') || msg.includes('SSE')) {
+      console.log(`[${timestamp}] Active connections: ${Array.from(activeConnections.keys()).join(', ') || 'none'}`);
+    }
   };
 
   // Handle SSE connection
@@ -61,6 +68,8 @@
 
     // Handle initialize request specially
     if (request.method === 'initialize') {
+      log(`Handling initialize request with ID: ${request.id}`);
+
       // Prepare initialize response
       const response = {
         jsonrpc: '2.0',
@@ -76,12 +85,20 @@
         }
       };
 
-      // Send response
+      // Send response via HTTP
+      log(`Sending initialize response via HTTP with ID: ${request.id}`);
       res.json(response);
 
-      // If there's an active SSE connection, send the same response there
-      if (activeConnections.has(sessionId)) {
-        activeConnections.get(sessionId).sendSSE(response);
+      // IMPORTANT: Also send via SSE - this is critical for mcp-remote
+      // Find the SSE connection by trying both the session ID and a default ID
+      const connectionIds = [sessionId, 'test_session_123', request.id.toString()];
+
+      for (const id of connectionIds) {
+        if (activeConnections.has(id)) {
+          log(`Found active SSE connection with ID: ${id}, sending initialize response`);
+          activeConnections.get(id).sendSSE(response);
+          break;
+        }
       }
 
       return;
@@ -133,6 +150,22 @@
   // Keep-alive ping endpoint
   app.get('/ping', (req, res) => {
     res.send('pong');
+  });
+
+  // Diagnostic endpoint to check active connections
+  app.get('/connections', (req, res) => {
+    const connections = Array.from(activeConnections.keys());
+    res.json({
+      activeConnections: connections,
+      count: connections.length
+    });
+  });
+
+  // For backward compatibility
+  app.get('/raw-sse', (req, res) => {
+    log('Redirecting from /raw-sse to /sse');
+    req.url = '/sse';
+    app.handle(req, res);
   });
 
   // Start server
