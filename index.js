@@ -56,7 +56,7 @@
     });
   });
 
-  // Enhanced SSE endpoint - FIXED version
+  // Enhanced SSE endpoint with specific fix for id line issue
   app.get('/raw-sse', async (req, res) => {
     // Log the incoming request
     logRequest(req);
@@ -117,42 +117,57 @@
           // Convert buffer to string
           const text = chunk.toString();
 
-          try {
-            // Check if it's already in SSE format
-            if (text.startsWith('data: ')) {
-              // Already in SSE format, forward as is but ensure double newline
-              if (!text.endsWith('\n\n')) {
-                res.write(text + '\n\n');
-              } else {
-                res.write(text);
-              }
-              console.log(`[SSE] Forwarded SSE: ${text.trim()}`);
-            } else {
-              // Not in SSE format, try to parse as JSON and convert
-              try {
-                let jsonData;
-                if (text.trim().startsWith('[') && text.trim().endsWith(']')) {
-                  // Handling array response
-                  jsonData = JSON.parse(text.trim());
-                  jsonData = jsonData[0]; // Extract first object
-                } else {
-                  // Regular JSON
-                  jsonData = JSON.parse(text.trim());
-                }
-
-                // Format as SSE with proper prefix and newlines
-                const sseMessage = `data: ${JSON.stringify(jsonData)}\n\n`;
+          // SPECIFIC FIX: Check if it contains the ID line that's causing issues
+          if (text.includes('id: ')) {
+            // Skip the ID line and only process the JSON-RPC message
+            const lines = text.split('\n');
+            for (const line of lines) {
+              // Only process the actual JSON-RPC message
+              if (line.includes('jsonrpc') && line.includes('result')) {
+                const sseMessage = `data: ${line}\n\n`;
                 res.write(sseMessage);
-                console.log(`[SSE] Converted to SSE: ${sseMessage.trim()}`);
-              } catch (parseError) {
-                // Not valid JSON, just forward the text as is but add SSE format
-                const sseMessage = `data: ${text}\n\n`;
-                res.write(sseMessage);
-                console.log(`[SSE] Forwarded as plain text SSE: ${sseMessage.trim()}`);
+                console.log(`[SSE] Forwarded clean JSON: ${sseMessage.trim()}`);
               }
             }
-          } catch (e) {
-            console.error(`[SSE] Error processing chunk: ${e.message}`);
+          } else {
+            // Normal processing for other chunks
+            try {
+              // Check if it's already in SSE format
+              if (text.startsWith('data: ')) {
+                // Already in SSE format, forward as is but ensure double newline
+                if (!text.endsWith('\n\n')) {
+                  res.write(text + '\n\n');
+                } else {
+                  res.write(text);
+                }
+                console.log(`[SSE] Forwarded SSE: ${text.trim()}`);
+              } else {
+                // Try to parse as JSON
+                try {
+                  let jsonData;
+                  if (text.trim().startsWith('[') && text.trim().endsWith(']')) {
+                    // Handling array response
+                    jsonData = JSON.parse(text.trim());
+                    jsonData = jsonData[0]; // Extract first object
+                  } else {
+                    // Regular JSON
+                    jsonData = JSON.parse(text.trim());
+                  }
+
+                  // Format as SSE with proper prefix and newlines
+                  const sseMessage = `data: ${JSON.stringify(jsonData)}\n\n`;
+                  res.write(sseMessage);
+                  console.log(`[SSE] Converted to SSE: ${sseMessage.trim()}`);
+                } catch (parseError) {
+                  // Not valid JSON, just forward the text as is but add SSE format
+                  const sseMessage = `data: ${text}\n\n`;
+                  res.write(sseMessage);
+                  console.log(`[SSE] Forwarded as plain text SSE: ${sseMessage.trim()}`);
+                }
+              }
+            } catch (e) {
+              console.error(`[SSE] Error processing chunk: ${e.message}`);
+            }
           }
         });
 
