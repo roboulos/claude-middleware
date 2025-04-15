@@ -1,374 +1,161 @@
   const express = require('express');
   const fetch = require('node-fetch');
+  const bodyParser = require('body-parser');
+  const EventSource = require('eventsource');
+
   const app = express();
+  app.use(bodyParser.json());
 
   const PORT = process.env.PORT || 3000;
-  const XANO_STREAM_URL = 'https://xnwv-v1z6-dvnr.n7c.xano.io/api:13ckfFnv/stream';
   const XANO_JSONRPC_URL = 'https://xnwv-v1z6-dvnr.n7c.xano.io/api:13ckfFnv/jsonrpc';
 
-  // Detailed request logging
-  const logRequest = (req, data) => {
-    console.log(`\n[${new Date().toISOString()}] ${req.method} ${req.url}`);
-    console.log(`Headers: ${JSON.stringify(req.headers)}`);
-    if (data) {
-      console.log(`Body: ${JSON.stringify(data).substring(0, 500)}`);
-    }
-    if (req.query && Object.keys(req.query).length > 0) {
-      console.log(`Query params: ${JSON.stringify(req.query)}`);
-    }
+  // Store active SSE connections
+  const activeConnections = new Map();
+
+  // Log helper
+  const log = (msg, data) => {
+    console.log(`[${new Date().toISOString()}] ${msg}`, data ? data : '');
   };
 
-  // Parse JSON bodies
-  app.use(express.json());
-
-  // CORS middleware for all responses
-  app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    // Pre-flight requests
-    if (req.method === 'OPTIONS') {
-      return res.status(200).end();
-    }
-
-    next();
-  });
-
-  // Keep-alive ping endpoint - to prevent Render from spinning down
-  app.get('/ping', (req, res) => {
-    res.status(200).send('pong');
-  });
-
-  // Health check endpoint
-  app.get('/health', (req, res) => {
-    res.status(200).send('OK');
-  });
-
-  // Info endpoint for debugging
-  app.get('/info', (req, res) => {
-    res.status(200).json({
-      sseEndpoint: '/raw-sse',
-      jsonrpcEndpoint: '/jsonrpc',
-      xanoSseUrl: XANO_STREAM_URL,
-      xanoJsonRpcUrl: XANO_JSONRPC_URL,
-      startTime: process.uptime()
-    });
-  });
-
-  // Enhanced SSE endpoint with immediate initialize response
-  app.get('/raw-sse', async (req, res) => {
-    // Log the incoming request
-    logRequest(req);
+  // Handle SSE connection
+  app.get('/sse', (req, res) => {
+    const sessionId = req.query.id || `session_${Date.now()}`;
+    log(`New SSE connection: ${sessionId}`);
 
     // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive'
+    });
 
-    // Get session ID from query parameters or generate a default
-    const sessionId = req.query.id || `session_${Date.now()}`;
-    console.log(`[SSE] Using session ID: ${sessionId}`);
-
-    // Send an immediate initialize response - this is critical for mcp-remote
-    const initResponse = {
-      jsonrpc: "2.0",
-      id: 0, // Use ID 0 for the initial response
-      result: {
-        server_info: {
-          name: "Xano MCP Server",
-          version: "1.0.0"
-        },
-        capabilities: {
-          methods: ["initialize", "tools/list", "tools/invoke"],
-          tools: {}
-        }
-      }
+    // Function to send SSE messages
+    const sendSSE = (data) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      log(`Sent SSE message: ${JSON.stringify(data).substring(0, 100)}...`);
     };
 
-    const sseInitMessage = `data: ${JSON.stringify(initResponse)}\n\n`;
-    res.write(sseInitMessage);
-    console.log(`[SSE] Sent immediate initialize response: ${sseInitMessage.trim()}`);
+    // Store connection info
+    activeConnections.set(sessionId, { res, sendSSE });
 
     // Set up heartbeat
     const heartbeatInterval = setInterval(() => {
       res.write(':\n\n'); // SSE comment for heartbeat
-      console.log(`[SSE] Sent heartbeat for session: ${sessionId}`);
     }, 5000);
 
-    // Connect to Xano's SSE endpoint
-    const xanoUrl = `${XANO_STREAM_URL}?id=${sessionId}`;
-    console.log(`[SSE] Connecting to Xano SSE at: ${xanoUrl}`);
-
-    try {
-      // Connect to Xano's SSE endpoint
-      const xanoResponse = await fetch(xanoUrl);
-
-      if (!xanoResponse.ok) {
-        console.error(`[SSE] Xano error: ${xanoResponse.status} ${xanoResponse.statusText}`);
-        // Don't end the connection, just log the error and continue with heartbeats
-        console.error(`[SSE] Continuing anyway with heartbeats`);
-      } else {
-        console.log(`[SSE] Connected to Xano SSE stream for session: ${sessionId}`);
-
-        // Handle the case where Xano might return a single JSON response instead of an SSE stream
-        const contentType = xanoResponse.headers.get('content-type');
-
-        if (contentType && contentType.includes('application/json')) {
-          // If Xano returns JSON directly, convert it to SSE format
-          try {
-            const jsonData = await xanoResponse.json();
-
-            // Extract single object if it's an array
-            const responseObj = Array.isArray(jsonData) ? jsonData[0] : jsonData;
-
-            // Format as SSE
-            const sseMessage = `data: ${JSON.stringify(responseObj)}\n\n`;
-            res.write(sseMessage);
-            console.log(`[SSE] Converted JSON to SSE: ${sseMessage.trim()}`);
-          } catch (e) {
-            console.error(`[SSE] Error parsing Xano JSON response: ${e.message}`);
-          }
-        } else {
-          // Process as normal SSE stream
-          // Process incoming data chunks
-          xanoResponse.body.on('data', (chunk) => {
-            // Convert buffer to string
-            const text = chunk.toString();
-
-            // SPECIFIC FIX: Check if it contains the ID line that's causing issues
-            if (text.includes('id: ')) {
-              // Skip the ID line and only process the JSON-RPC message
-              const lines = text.split('\n');
-              for (const line of lines) {
-                // Only process the actual JSON-RPC message
-                if (line.includes('jsonrpc') && line.includes('result')) {
-                  // Check if the line already has a "data: " prefix and remove it
-                  const cleanLine = line.startsWith('data: ') ? line.substring(6) : line;
-                  const sseMessage = `data: ${cleanLine}\n\n`;
-                  res.write(sseMessage);
-                  console.log(`[SSE] Forwarded clean JSON: ${sseMessage.trim()}`);
-                }
-              }
-            } else {
-              // Normal processing for other chunks
-              try {
-                // Check if it's already in SSE format
-                if (text.startsWith('data: ')) {
-                  // Already in SSE format, forward as is but ensure double newline
-                  if (!text.endsWith('\n\n')) {
-                    res.write(text + '\n\n');
-                  } else {
-                    res.write(text);
-                  }
-                  console.log(`[SSE] Forwarded SSE: ${text.trim()}`);
-                } else {
-                  // Try to parse as JSON
-                  try {
-                    let jsonData;
-                    if (text.trim().startsWith('[') && text.trim().endsWith(']')) {
-                      // Handling array response
-                      jsonData = JSON.parse(text.trim());
-                      jsonData = jsonData[0]; // Extract first object
-                    } else {
-                      // Regular JSON
-                      jsonData = JSON.parse(text.trim());
-                    }
-
-                    // Format as SSE with proper prefix and newlines
-                    const sseMessage = `data: ${JSON.stringify(jsonData)}\n\n`;
-                    res.write(sseMessage);
-                    console.log(`[SSE] Converted to SSE: ${sseMessage.trim()}`);
-                  } catch (parseError) {
-                    // Not valid JSON, just forward the text as is but add SSE format
-                    const sseMessage = `data: ${text}\n\n`;
-                    res.write(sseMessage);
-                    console.log(`[SSE] Forwarded as plain text SSE: ${sseMessage.trim()}`);
-                  }
-                }
-              } catch (e) {
-                console.error(`[SSE] Error processing chunk: ${e.message}`);
-              }
-            }
-          });
-
-          // When Xano stream ends, keep the connection alive
-          xanoResponse.body.on('end', () => {
-            console.log(`[SSE] Xano stream ended for session: ${sessionId}, but keeping client connection open`);
-            // No need to resend initialize since we sent it at the beginning
-          });
-
-          // Handle stream errors
-          xanoResponse.body.on('error', (err) => {
-            console.error(`[SSE] Stream error for session ${sessionId}:`, err);
-            // Don't end the connection - it will be kept alive by the heartbeat
-          });
-        }
-      }
-
-      // Handle client disconnect
-      req.on('close', () => {
-        clearInterval(heartbeatInterval);
-        console.log(`[SSE] Client disconnected for session: ${sessionId}`);
-      });
-    } catch (err) {
-      console.error(`[SSE] Connection error for session ${sessionId}:`, err);
-      // Don't end the connection, just log the error and continue with heartbeats
-      console.error(`[SSE] Continuing anyway with heartbeats`);
-    }
+    // Handle client disconnect
+    req.on('close', () => {
+      clearInterval(heartbeatInterval);
+      activeConnections.delete(sessionId);
+      log(`SSE connection closed: ${sessionId}`);
+    });
   });
 
-  // Enhanced JSON-RPC endpoint - handles initialize requests directly
+  // Handle JSON-RPC requests
   app.post('/jsonrpc', async (req, res) => {
-    // Log the incoming request
-    logRequest(req, req.body);
+    const request = req.body;
+    log(`Received JSON-RPC request: ${request.method}`, request);
 
-    try {
-      // Get the client's request body
-      const clientRequest = req.body;
+    // Get session ID
+    const sessionId = req.query.id || request.id;
 
-      // Get session ID from query parameters, or use the client's ID if it's a string
-      let sessionId;
-      if (req.query.id) {
-        sessionId = req.query.id;
-        console.log(`[RPC] Using session ID from URL: ${sessionId}`);
-      } else if (typeof clientRequest.id === 'string' && clientRequest.id.length > 0) {
-        sessionId = clientRequest.id;
-        console.log(`[RPC] Using session ID from request body: ${sessionId}`);
-      } else {
-        // For numeric IDs, use a default session ID
-        sessionId = `test_session_123`;
-        console.log(`[RPC] Using default session ID: ${sessionId}`);
-      }
-
-      // Special handling for initialize request
-      if (clientRequest.method === 'initialize') {
-        console.log(`[RPC] Handling initialize request specifically`);
-
-        // Prepare a standard initialize response
-        const initResponse = {
-          jsonrpc: "2.0",
-          id: clientRequest.id, // Use the original client ID for response
-          result: {
-            server_info: {
-              name: "Xano MCP Server",
-              version: "1.0.0"
-            },
-            capabilities: {
-              methods: ["initialize", "tools/list", "tools/invoke"],
-              tools: {}
-            }
+    // Handle initialize request specially
+    if (request.method === 'initialize') {
+      // Prepare initialize response
+      const response = {
+        jsonrpc: '2.0',
+        id: request.id,
+        result: {
+          server_info: {
+            name: 'Xano MCP Server',
+            version: '1.0.0'
+          },
+          capabilities: {
+            methods: ['initialize', 'tools/list', 'tools/invoke']
           }
-        };
+        }
+      };
 
-        // Return the initialize response immediately
-        console.log(`[RPC] Returning initialize response directly`);
-        return res.status(200).json(initResponse);
+      // Send response
+      res.json(response);
+
+      // If there's an active SSE connection, send the same response there
+      if (activeConnections.has(sessionId)) {
+        activeConnections.get(sessionId).sendSSE(response);
       }
 
-      // Create modified request with session ID as the id
+      return;
+    }
+
+    // For other requests, forward to Xano
+    try {
+      // Modify request to use string session ID
       const modifiedRequest = {
-        ...clientRequest,
+        ...request,
         id: sessionId
       };
 
-      // Upgrade initialize protocol version if needed
-      if (clientRequest.method === 'initialize' &&
-          clientRequest.params &&
-          clientRequest.params.protocolVersion === '2024-11-05') {
-        modifiedRequest.params = {
-          ...clientRequest.params,
-          protocolVersion: '2025-03-26'
-        };
-        console.log(`[RPC] Upgraded protocol version from 2024-11-05 to 2025-03-26`);
-      }
-
-      console.log(`[RPC] Forwarding to Xano with ID: ${sessionId}`);
-
-      // Forward to Xano's JSON-RPC endpoint
+      // Forward to Xano
       const xanoResponse = await fetch(XANO_JSONRPC_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(modifiedRequest)
       });
 
-      // Parse the Xano response
-      let responseData;
-      try {
-        responseData = await xanoResponse.json();
-        console.log(`[RPC] Xano response status: ${xanoResponse.status}`);
-        console.log(`[RPC] Xano response data: ${JSON.stringify(responseData).substring(0, 500)}`);
-      } catch (e) {
-        console.error(`[RPC] Error parsing Xano response: ${e.message}`);
-        const rawText = await xanoResponse.text();
-        console.log(`[RPC] Raw response: ${rawText.substring(0, 500)}`);
-
-        // Return error to client
-        return res.status(502).json({
-          jsonrpc: '2.0',
-          error: {
-            code: -32603,
-            message: 'Invalid JSON response from server'
-          },
-          id: clientRequest.id
-        });
-      }
+      // Get response
+      const responseData = await xanoResponse.json();
 
       // Special handling for tools/list to ensure proper format
-      if (clientRequest.method === 'tools/list' && Array.isArray(responseData.result)) {
-        console.log(`[RPC] Reformatting tools/list response`);
+      if (request.method === 'tools/list' && Array.isArray(responseData.result)) {
         responseData.result = {
           tools: responseData.result
         };
       }
 
-      // Return the modified response to the client
-      // If client sent numeric ID, preserve it in the response
-      if (typeof clientRequest.id === 'number') {
-        responseData.id = clientRequest.id;
-      }
+      // Preserve original request ID
+      responseData.id = request.id;
 
-      // Return the response
-      res.status(xanoResponse.status).json(responseData);
-    } catch (err) {
-      console.error(`[RPC] Error: ${err.message}`);
-
-      // Return a proper error response
+      // Send response
+      res.json(responseData);
+    } catch (error) {
+      log(`Error forwarding request to Xano: ${error.message}`);
       res.status(500).json({
         jsonrpc: '2.0',
+        id: request.id,
         error: {
           code: -32603,
-          message: 'Internal server error: ' + err.message
-        },
-        id: req.body.id
+          message: 'Internal server error: ' + error.message
+        }
       });
     }
   });
 
-  // Support the /raw-sse/jsonrpc path too for compatibility
-  app.post('/raw-sse/jsonrpc', async (req, res) => {
-    console.log(`[RPC-ALT] Request to /raw-sse/jsonrpc - forwarding to /jsonrpc handler`);
-
-    // Forward to the main JSON-RPC handler
-    req.url = '/jsonrpc';
-    app.handle(req, res);
+  // Keep-alive ping endpoint
+  app.get('/ping', (req, res) => {
+    res.send('pong');
   });
 
-  // Prevent errors for other routes
-  app.use((req, res) => {
-    console.log(`[404] Not found: ${req.method} ${req.url}`);
-    res.status(404).json({ error: 'Not found' });
-  });
-
-  // Handle errors
-  app.use((err, req, res, next) => {
-    console.error(`[ERROR] ${err.stack}`);
-    res.status(500).json({ error: 'Server error' });
-  });
-
-  // Start the server
+  // Start server
   app.listen(PORT, () => {
-    console.log(`Proxy server running on port ${PORT}`);
-    console.log(`Xano SSE URL: ${XANO_STREAM_URL}`);
-    console.log(`Xano JSON-RPC URL: ${XANO_JSONRPC_URL}`);
+    log(`Server running on port ${PORT}`);
   });
+
+  This simplified approach:
+  1. Creates a dedicated SSE endpoint at /sse
+  2. Handles JSON-RPC requests at /jsonrpc
+  3. Tracks active SSE connections
+  4. Responds to initialize requests immediately
+  5. Follows the approach outlined in the Cloudflare documentation
+
+  Try updating your mcp-remote configuration to use these new endpoints:
+  {
+    "mcpServers": {
+      "xano-remote": {
+        "command": "npx",
+        "args": [
+          "mcp-remote",
+          "https://claude-sse-proxy.onrender.com/sse?id=test_session_123"
+        ]
+      }
+    }
+  }
