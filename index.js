@@ -117,19 +117,21 @@
           // Convert buffer to string
           const text = chunk.toString();
 
-          // SPECIFIC FIX: Check if it contains the ID line that's causing issues
-          if (text.includes('id: ')) {
-            // Skip the ID line and only process the JSON-RPC message
-            const lines = text.split('\n');
-            for (const line of lines) {
-              // Only process the actual JSON-RPC message
-              if (line.includes('jsonrpc') && line.includes('result')) {
-                const sseMessage = `data: ${line}\n\n`;
-                res.write(sseMessage);
-                console.log(`[SSE] Forwarded clean JSON: ${sseMessage.trim()}`);
-              }
-            }
-          } else {
+           // SPECIFIC FIX: Check if it contains the ID line that's causing issues
+  if (text.includes('id: ')) {
+    // Skip the ID line and only process the JSON-RPC message
+    const lines = text.split('\n');
+    for (const line of lines) {
+      // Only process the actual JSON-RPC message
+      if (line.includes('jsonrpc') && line.includes('result')) {
+        // Check if the line already has a "data: " prefix and remove it
+        const cleanLine = line.startsWith('data: ') ? line.substring(6) : line;
+        const sseMessage = `data: ${cleanLine}\n\n`;
+        res.write(sseMessage);
+        console.log(`[SSE] Forwarded clean JSON: ${sseMessage.trim()}`);
+      }
+    }
+  } else {
             // Normal processing for other chunks
             try {
               // Check if it's already in SSE format
