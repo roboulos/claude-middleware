@@ -139,23 +139,3 @@
   app.listen(PORT, () => {
     log(`Server running on port ${PORT}`);
   });
-
-  This simplified approach:
-  1. Creates a dedicated SSE endpoint at /sse
-  2. Handles JSON-RPC requests at /jsonrpc
-  3. Tracks active SSE connections
-  4. Responds to initialize requests immediately
-  5. Follows the approach outlined in the Cloudflare documentation
-
-  Try updating your mcp-remote configuration to use these new endpoints:
-  {
-    "mcpServers": {
-      "xano-remote": {
-        "command": "npx",
-        "args": [
-          "mcp-remote",
-          "https://claude-sse-proxy.onrender.com/sse?id=test_session_123"
-        ]
-      }
-    }
-  }
